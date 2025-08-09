@@ -1,5 +1,5 @@
 const { 
-    giftedId,
+    giftedId: teranId,
     removeFile
 } = require('../lib'); 
 
@@ -15,7 +15,7 @@ const SESSIONS_API_URL = process.env.SESSIONS_API_URL;
 const SESSIONS_API_KEY = process.env.SESSIONS_API_KEY;
 
 const {
-    default: Gifted_Tech,
+    default: TERAN_XMD,
     useMultiFileAuthState,
     delay,
     makeCacheableSignalKeyStore,
@@ -25,15 +25,15 @@ const {
 async function uploadCreds(id) {
     try {
         const authPath = path.join(__dirname, 'temp', id, 'creds.json');
-        
+
         if (!fs.existsSync(authPath)) {
             console.error('Creds file not found at:', authPath);
             return null;
         }
 
         const credsData = JSON.parse(fs.readFileSync(authPath, 'utf8'));
-        const credsId = giftedId();
-        
+        const credsId = teranId();
+
         const response = await axios.post(
             `${SESSIONS_API_URL}/api/uploadCreds.php`,
             { credsId, credsData },
@@ -52,16 +52,16 @@ async function uploadCreds(id) {
 }
 
 router.get('/', async (req, res) => {
-    const id = giftedId(); 
+    const id = teranId(); 
     let num = req.query.number;
 
     if (!num) {
         return res.status(400).send({ error: "Phone number is required" });
     }
 
-    async function GIFTED_PAIR_CODE() {
+    async function TERAN_PAIR_CODE() {
         const authDir = path.join(__dirname, 'temp', id);
-        
+
         try {
             if (!fs.existsSync(authDir)) {
                 fs.mkdirSync(authDir, { recursive: true });
@@ -69,7 +69,7 @@ router.get('/', async (req, res) => {
 
             const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-            let Gifted = Gifted_Tech({
+            let Teran = TERAN_XMD({
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -79,10 +79,10 @@ router.get('/', async (req, res) => {
                 browser: Browsers.macOS("Safari")
             });
 
-            if (!Gifted.authState.creds.registered) {
+            if (!Teran.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
-                const code = await Gifted.requestPairingCode(num);
+                const code = await Teran.requestPairingCode(num);
                 console.log(`Your Code: ${code}`);
 
                 if (!res.headersSent) {
@@ -90,67 +90,50 @@ router.get('/', async (req, res) => {
                 }
             }
 
-            Gifted.ev.on('creds.update', saveCreds);
-            
-            Gifted.ev.on("connection.update", async (s) => {
+            Teran.ev.on('creds.update', saveCreds);
+
+            Teran.ev.on("connection.update", async (s) => {
                 const { connection, lastDisconnect } = s;
 
-                if (connection === "open") {
-                    await delay(5000);
-                    
-                    try {
-                        const sessionId = await uploadCreds(id);
-                        if (!sessionId) {
-                            throw new Error('Failed to upload credentials');
-                        }
+               if (connection === "open") {
+    await delay(5000);
 
-                        const session = await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
-
-                        const GIFTED_TEXT = `
-*✅sᴇssɪᴏɴ ɪᴅ ɢᴇɴᴇʀᴀᴛᴇᴅ✅*
-______________________________
-╔════◇
-║『 𝐘𝐎𝐔'𝐕𝐄 𝐂𝐇𝐎𝐒𝐄𝐍 𝐆𝐈𝐅𝐓𝐄𝐃 𝐌𝐃 』
-╚══════════════╝
-╔═════◇
-║ 『••• 𝗩𝗶𝘀𝗶𝘁 𝗙𝗼𝗿 𝗛𝗲𝗹𝗽 •••』
-║❒ 𝐓𝐮𝐭𝐨𝐫𝐢𝐚𝐥: _youtube.com/@pktech_
-║❒ 𝐎𝐰𝐧𝐞𝐫: _https://t.me/mouricedevs_
-║❒ 𝐑𝐞𝐩𝐨: _https://github.com/Pkdriller/NEXUS-XMD_
-║❒ 𝐕𝐚𝐥𝐢𝐝𝐚𝐭𝐨𝐫: _https://pr-driller-gho2.onrender.com/_
-║❒ 𝐖𝐚𝐂𝐡𝐚𝐧𝐧𝐞𝐥: __https://whatsapp.com/channel/0029Vad7YNyJuyA77CtIPX0x
-║ 💜💜💜
-╚══════════════╝ 
- 𝗚𝗜𝗙𝗧𝗘𝗗-𝗠𝗗 𝗩𝗘𝗥𝗦𝗜𝗢𝗡 5.𝟬.𝟬
-______________________________
-
-Use the Quoted Session ID to Deploy your Bot.
-Validate it First Using the Validator Link.`;
-
-                        await Gifted.sendMessage(Gifted.user.id, { text: GIFTED_TEXT }, { quoted: session });
-                    } catch (err) {
-                        console.error('Error in connection update:', err);
-                    } finally {
-                        await delay(100);
-                        await Gifted.ws.close();
-                        removeFile(authDir).catch(err => console.error('Error removing temp files:', err));
-                    }
-                } else if (connection === "close" && lastDisconnect?.error?.output?.statusCode !== 401) {
-                    await delay(10000);
-                    GIFTED_PAIR_CODE().catch(err => console.error('Error restarting pairing:', err));
-                }
-            });
-        } catch (err) {
-            console.error("Service Error:", err);
-            removeFile(authDir).catch(err => console.error('Error cleaning up:', err));
-
-            if (!res.headersSent) {
-                res.status(500).send({ error: "Service is Currently Unavailable" });
-            }
+    try {
+        const sessionId = await uploadCreds(id);
+        if (!sessionId) {
+            throw new Error('Failed to upload credentials');
         }
+
+        // Send the Session ID as the first message
+        const session = await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
+
+        // Your custom TERAN-XMD branding message
+        const TERAN_BRAND = `
+╔════════════════════════════╗
+║  ████████╗███████╗██████╗  ║
+║  ╚══██╔══╝██╔════╝██╔══██╗ ║
+║     ██║   █████╗  ██████╔╝ ║
+║     ██║   ██╔══╝  ██╔═══╝  ║
+║     ██║   ███████╗██║      ║
+║     ╚═╝   ╚══════╝╚═╝      ║
+║       TERAN  •  XMD        ║
+╚════════════════════════════╝
+
+*✅ Session ID Generated ✅*
+────────────────────────────
+Use the above Session ID to deploy your bot.
+Make sure to validate it first using your validator tool.
+────────────────────────────
+Version: 5.0.0
+`;
+
+        await Gifted.sendMessage(Gifted.user.id, { text: TERAN_BRAND }, { quoted: session });
+
+    } catch (err) {
+        console.error('Error in connection update:', err);
+    } finally {
+        await delay(100);
+        await Gifted.ws.close();
+        removeFile(authDir).catch(err => console.error('Error removing temp files:', err));
     }
-
-    await GIFTED_PAIR_CODE();
-});
-
-module.exports = router;
+}
