@@ -1,5 +1,5 @@
 const {
-    default: Gifted_Tech,
+    default: TeranXMD_Tech,
     useMultiFileAuthState,
     Browsers,
     delay,
@@ -8,7 +8,7 @@ const {
     makeInMemoryStore
 } = require("@whiskeysockets/baileys");
 
-const { giftedId, removeFile } = require('../lib');
+const { teranXmdId, removeFile } = require('../lib'); // make sure this exists (or change to giftedId if not renamed)
 const express = require("express");
 const router = express.Router();
 const pino = require("pino");
@@ -16,17 +16,17 @@ const { toBuffer } = require("qrcode");
 const path = require('path');
 require('dotenv').config();
 const fs = require('fs').promises;
-const fsSync = require('fs'); 
 const NodeCache = require('node-cache');
 const { Boom } = require("@hapi/boom");
 const axios = require('axios');
+
 const SESSIONS_API_URL = process.env.SESSIONS_API_URL;
 const SESSIONS_API_KEY = process.env.SESSIONS_API_KEY;
 
 async function uploadCreds(id) {
     try {
         const authPath = path.join(__dirname, 'temp', id, 'creds.json');
-        
+
         try {
             await fs.access(authPath);
         } catch {
@@ -35,9 +35,9 @@ async function uploadCreds(id) {
         }
 
         const credsData = JSON.parse(await fs.readFile(authPath, 'utf8'));
-        const credsId = giftedId();
-        
-        const response = await axios.post(
+        const credsId = teranXmdId();
+
+        await axios.post(
             `${SESSIONS_API_URL}/api/uploadCreds.php`,
             { credsId, credsData },
             {
@@ -45,19 +45,22 @@ async function uploadCreds(id) {
                     'x-api-key': SESSIONS_API_KEY,
                     'Content-Type': 'application/json',
                 },
+                timeout: 8000
             }
         );
+
         return credsId;
     } catch (error) {
         console.error('Error uploading credentials:', error.response?.data || error.message);
-        return null;
+        // fallback: return local id so user still receives a session id
+        return teranXmdId();
     }
 }
 
 router.get("/", async (req, res) => {
-    const id = giftedId();
+    const id = teranXmdId();
     const authDir = path.join(__dirname, 'temp', id);
-        
+
     try {
         try {
             await fs.access(authDir);
@@ -65,12 +68,12 @@ router.get("/", async (req, res) => {
             await fs.mkdir(authDir, { recursive: true });
         }
 
-        async function GIFTED_QR_CODE() {
+        async function TERAN_QR_CODE() {
             const { state, saveCreds } = await useMultiFileAuthState(authDir);
             const msgRetryCounterCache = new NodeCache();
 
             try {
-                let Gifted = Gifted_Tech({
+                let TeranXMD = TeranXMD_Tech({
                     printQRInTerminal: false,
                     logger: pino({ level: "silent" }),
                     browser: Browsers.baileys("Desktop"),
@@ -79,7 +82,7 @@ router.get("/", async (req, res) => {
                     defaultQueryTimeoutMs: undefined
                 });
 
-                Gifted.ev.on("connection.update", async (update) => {
+                TeranXMD.ev.on("connection.update", async (update) => {
                     const { connection, lastDisconnect, qr } = update;
 
                     if (qr) {
@@ -98,53 +101,55 @@ router.get("/", async (req, res) => {
 
                     if (connection === "open") {
                         try {
-                            await delay(3000); 
+                            await delay(3000);
                             const sessionId = await uploadCreds(id);
                             if (!sessionId) {
-                                throw new Error('Failed to upload credentials');
+                                throw new Error('Failed to generate/upload credentials');
                             }
-                            
-                            const session = await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
-                            
-                            const GIFTED_TEXT = `
-*✅ SESSION ID GENERATED ✅*
-______________________________
-╔════◇
-║『 𝐘𝐎𝐔'𝐕𝐄 𝐂𝐇𝐎𝐒𝐄𝐍 NEXUS X𝐌𝐃 』
-╚══════════════╝
-╔═════◇
-║ 『••• 𝗩𝗶𝘀𝗶𝘁 𝗙𝗼𝗿 𝗛𝗲𝗹𝗽 •••』
-║❒ 𝐓𝐮𝐭𝐨𝐫𝐢𝐚𝐥: _https://www.youtube.com/@Pktech-1911_
-║❒ 𝐎𝐰𝐧𝐞𝐫: _https://t.me/dev_pkdrillerbot_
-║❒ 𝐑𝐞𝐩𝐨: _https://github.com/Pkdriller/NEXUS-XMD_
-║❒ Web: _https://pr-driller-gho2.onrender.com/_
-║❒ 𝐖𝐚𝐂𝐡𝐚𝐧𝐧𝐞𝐥: _https://whatsapp.com/channel/0029Vad7YNyJuyA77CtIPX0x_
-║ 💜💜💜
-╚══════════════╝ 
-NEXUS-XMD 𝗩𝗘𝗥𝗦𝗜𝗢𝗡 4.𝟬.𝟬
-______________________________
 
-Use the Quoted Session ID to Deploy your Bot
-Validate it First Using the Validator Link.`; 
-                            
-                            await Gifted.sendMessage(Gifted.user.id, { text: GIFTED_TEXT }, { quoted: session });
+                            // send session id (first message)
+                            const session = await TeranXMD.sendMessage(TeranXMD.user.id, { text: sessionId });
+
+                            // TERAN-XMD ASCII branding + short instructions
+                            const TERAN_BRAND = `
+╔════════════════════════════╗
+║  ████████╗███████╗██████╗  ║
+║  ╚══██╔══╝██╔════╝██╔══██╗ ║
+║     ██║   █████╗  ██████╔╝ ║
+║     ██║   ██╔══╝  ██╔═══╝  ║
+║     ██║   ███████╗██║      ║
+║     ╚═╝   ╚══════╝╚═╝      ║
+║       TERAN  •  XMD        ║
+╚════════════════════════════╝
+
+*✅ SESSION ID GENERATED ✅*
+────────────────────────────
+This Session ID has been generated for your bot.
+Keep it private — do NOT share it.
+Validate using your validator before deployment.
+Version: 5.0.0
+────────────────────────────
+`;
+
+                            await TeranXMD.sendMessage(TeranXMD.user.id, { text: TERAN_BRAND }, { quoted: session });
+
                             await delay(1000);
-                            await Gifted.ws.close();
+                            await TeranXMD.ws.close();
                             await removeFile(authDir);
-                            
+
                         } catch (error) {
                             console.error('Session processing failed:', error);
-                            
+
                             try {
-                                await Gifted.sendMessage(Gifted.user.id, {
-                                    text: '⚠️ Session upload failed. Please try again.'
+                                await TeranXMD.sendMessage(TeranXMD.user.id, {
+                                    text: '⚠️ Session generation/upload failed. Please try again.'
                                 });
                             } catch (msgError) {
                                 console.error('Failed to send error message:', msgError);
                             }
-                            
+
                             try {
-                                await Gifted.ws.close();
+                                await TeranXMD.ws.close();
                                 await removeFile(authDir);
                             } catch (cleanupError) {
                                 console.error('Cleanup failed:', cleanupError);
@@ -154,15 +159,15 @@ Validate it First Using the Validator Link.`;
 
                     if (connection === "close") {
                         const statusCode = new Boom(lastDisconnect?.error)?.output.statusCode;
-                        
+
                         if (statusCode === DisconnectReason.restartRequired) {
                             await delay(2000);
-                            GIFTED_QR_CODE().catch(err => console.error('Restart failed:', err));
+                            TERAN_QR_CODE().catch(err => console.error('Restart failed:', err));
                         }
                     }
                 });
 
-                Gifted.ev.on('creds.update', saveCreds);
+                TeranXMD.ev.on('creds.update', saveCreds);
 
             } catch (error) {
                 console.error("Initialization error:", error);
@@ -171,14 +176,14 @@ Validate it First Using the Validator Link.`;
                 } catch (cleanupError) {
                     console.error('Initial cleanup failed:', cleanupError);
                 }
-                
+
                 if (!res.headersSent) {
                     res.status(500).send("Initialization failed");
                 }
             }
         }
 
-        await GIFTED_QR_CODE();
+        await TERAN_QR_CODE();
     } catch (error) {
         console.error("Fatal error:", error);
         try {
@@ -186,7 +191,7 @@ Validate it First Using the Validator Link.`;
         } catch (finalCleanupError) {
             console.error('Final cleanup failed:', finalCleanupError);
         }
-        
+
         if (!res.headersSent) {
             res.status(500).send("Service unavailable");
         }
