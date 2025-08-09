@@ -1,16 +1,15 @@
 {
-  "description": "gifted-pair-code",
+  "name": "teranxmd-session-server",
+  "description": "TERAN-XMD Web Session Generator",
   "main": "./index.js",
   "type": "commonjs",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
-    "start": "pm2 start index.js --deep-monitoring --attach --name gifted",
-    "stop": "pm2 stop gifted",
-    "restart": "pm2 restart gifted"
+    "start": "node index.js"
   },
-  "author": "Gifted Tech",
+  "author": "TERAN-XMD",
   "license": "GPL-3.0 license",
   "dependencies": {
     "awesome-phonenumber": "^2.64.0",
@@ -26,7 +25,6 @@
     "path": "*",
     "phone": "3.1.30",
     "pino": "*",
-    "pm2": "^5.2.0",
     "qrcode": "*"
   }
 }
