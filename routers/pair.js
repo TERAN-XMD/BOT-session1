@@ -1,117 +1,195 @@
-const { teranId, removeFile } = require('../lib'); // fixed import
+// filename: routes/pair.js
+const { teranId, removeFile } = require('../lib'); // ensure lib exports teranId
 const express = require('express');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const axios = require('axios');
 require('dotenv').config();
-const pino = require("pino");
+const pino = require('pino');
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
 const {
-    default: TERAN_XMD,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
-    Browsers
-} = require("@whiskeysockets/baileys");
+  default: TERAN_XMD,
+  useMultiFileAuthState,
+  delay,
+  makeCacheableSignalKeyStore,
+  Browsers
+} = require('@whiskeysockets/baileys');
+
+const { SESSIONS_API_URL, SESSIONS_API_KEY } = process.env;
+if (!SESSIONS_API_URL || !SESSIONS_API_KEY) {
+  throw new Error('Missing env vars: SESSIONS_API_URL and SESSIONS_API_KEY are required');
+}
 
 const router = express.Router();
-const { SESSIONS_API_URL, SESSIONS_API_KEY } = process.env;
 
-async function uploadCreds(id) {
+// uploadCreds with small retry/backoff
+async function uploadCreds(tempId) {
+  const authPath = path.join(__dirname, 'temp', tempId, 'creds.json');
+  const credsId = teranId();
+
+  // confirm file exists and read
+  try {
+    await fs.access(authPath);
+  } catch (err) {
+    logger.error({ authPath, err }, 'Creds file not found before upload');
+    throw new Error('creds.json not found');
+  }
+
+  const credsData = JSON.parse(await fs.readFile(authPath, 'utf8'));
+
+  const payload = { credsId, credsData };
+
+  const maxAttempts = 3;
+  let attempt = 0;
+  let lastErr = null;
+
+  while (attempt < maxAttempts) {
+    attempt++;
     try {
-        const authPath = path.join(__dirname, 'temp', id, 'creds.json');
-
-        try {
-            await fs.access(authPath);
-        } catch {
-            console.error('❌ Creds file not found:', authPath);
-            return null;
+      logger.info({ attempt }, 'Uploading creds to sessions API');
+      const resp = await axios.post(
+        `${SESSIONS_API_URL}/api/uploadCreds.php`,
+        payload,
+        {
+          headers: {
+            'x-api-key': SESSIONS_API_KEY,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
         }
-
-        const credsData = JSON.parse(await fs.readFile(authPath, 'utf8'));
-        const credsId = teranId();
-
-        await axios.post(
-            `${SESSIONS_API_URL}/api/uploadCreds.php`,
-            { credsId, credsData },
-            {
-                headers: {
-                    'x-api-key': SESSIONS_API_KEY,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 10000
-            }
-        );
-
-        return credsId;
-    } catch (error) {
-        console.error('❌ Error uploading credentials:', error.response?.data || error.message);
-        return null;
+      );
+      logger.info({ status: resp.status, data: resp.data }, 'Upload successful');
+      return credsId;
+    } catch (err) {
+      lastErr = err;
+      logger.warn({ attempt, err: err.response?.data || err.message }, 'Upload attempt failed');
+      // backoff
+      await new Promise(r => setTimeout(r, 500 * attempt));
     }
+  }
+
+  throw lastErr || new Error('Unknown upload error');
+}
+
+// Helper to send SSE event
+function sseSend(res, event, obj) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
 
 router.get('/', async (req, res) => {
-    const pairingId = teranId();
-    const phoneNumber = req.query.number;
+  const phoneRaw = req.query.number;
+  if (!phoneRaw) {
+    return res.status(400).json({ error: 'Phone number is required' });
+  }
+  const phone = String(phoneRaw).replace(/[^0-9]/g, '');
+  if (!phone) {
+    return res.status(400).json({ error: 'Phone number invalid after sanitization' });
+  }
 
-    if (!phoneNumber) {
-        return res.status(400).json({ error: "Phone number is required" });
-    }
+  // Set SSE headers so client can receive streaming updates
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
 
-    const authDir = path.join(__dirname, 'temp', pairingId);
+  const tempId = teranId();
+  const authDir = path.join(__dirname, 'temp', tempId);
+
+  try {
     await fs.mkdir(authDir, { recursive: true });
+  } catch (err) {
+    logger.error({ err }, 'Failed to create auth dir');
+    sseSend(res, 'error', { message: 'failed to create auth dir' });
+    res.end();
+    return;
+  }
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  let wsClosed = false;
+  let pairingDone = false;
 
-    const Gifted = TERAN_XMD({
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
-        },
-        printQRInTerminal: false,
-        logger: pino({ level: "fatal" }),
-        browser: Browsers.macOS("Safari")
-    });
+  // watchdog - abort if not connected within X ms
+  const WATCHDOG_MS = Number(process.env.PAIRING_WATCHDOG_MS || 120000); // default 2 minutes
+  const watchdog = setTimeout(async () => {
+    if (!pairingDone) {
+      logger.warn('Watchdog timed out — aborting pairing');
+      sseSend(res, 'error', { message: 'pairing timeout' });
+      res.end();
+      try { await removeFile(authDir); } catch(e) { logger.warn(e, 'cleanup after watchdog'); }
+    }
+  }, WATCHDOG_MS);
 
-    let pairingDone = false;
+  // create Baileys state
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    if (!Gifted.authState.creds.registered) {
-        await delay(1500);
-        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-        const code = await Gifted.requestPairingCode(cleanNumber);
-        console.log(`📲 Pairing Code for ${cleanNumber}: ${code}`);
+  const Gifted = TERAN_XMD({
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })),
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || 'fatal' }),
+    browser: Browsers.macOS('Safari'),
+  });
 
-        res.write(JSON.stringify({ code }) + "\n");
-        res.flush?.();
+  Gifted.ev.on('creds.update', async (...args) => {
+    logger.info('creds.update event');
+    try {
+      await saveCreds(...args);
+    } catch (e) {
+      logger.error(e, 'saveCreds failed');
+    }
+  });
+
+  Gifted.ev.on('connection.update', async (update) => {
+    logger.info({ update }, 'connection.update');
+    const { connection, lastDisconnect } = update;
+
+    // log lastDisconnect details
+    if (lastDisconnect) {
+      logger.info({ lastDisconnect }, 'lastDisconnect details');
     }
 
-    Gifted.ev.on('creds.update', saveCreds);
+    // when the connection closes unexpectedly
+    if (connection === 'close' && !pairingDone) {
+      pairingDone = true;
+      const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message || 'unknown';
+      logger.error({ reason }, 'Connection closed before pairing finished');
+      sseSend(res, 'error', { message: 'connection closed', reason });
+      res.end();
+      clearTimeout(watchdog);
+      try { await Gifted.ws.close(); } catch(e) { logger.debug(e, 'ws close error'); }
+      try { await removeFile(authDir); } catch(e) { logger.warn(e, 'cleanup error'); }
+    }
 
-    const cleanup = async () => {
-        await delay(100);
-        await Gifted.ws.close().catch(() => {});
-        await removeFile(authDir);
-    };
+    // successful open
+    if (connection === 'open' && !pairingDone) {
+      pairingDone = true;
+      clearTimeout(watchdog);
+      logger.info('Connection OPEN - proceeding to upload creds');
 
-    Gifted.ev.on("connection.update", async (update) => {
-        console.log("🔄 Connection Update:", update);
-        const { connection, lastDisconnect } = update;
+      // ensure creds.json exists before uploading
+      const credsPath = path.join(authDir, 'creds.json');
+      try {
+        // wait briefly for creds to be flushed
+        await delay(200);
+        await fs.access(credsPath);
+      } catch (err) {
+        logger.error({ err }, 'creds.json not ready');
+        sseSend(res, 'error', { message: 'creds not ready' });
+        res.end();
+        try { await Gifted.ws.close(); } catch(e) {}
+        await removeFile(authDir).catch(e => logger.warn(e, 'removeFile'));
+        return;
+      }
 
-        if (connection === "close" && !pairingDone) {
-            pairingDone = true;
-            const reason = lastDisconnect?.error?.output?.statusCode;
-            res.write(JSON.stringify({ error: "Connection closed", reason }) + "\n");
-            res.end();
-            await cleanup();
-        }
+      try {
+        const sessionId = await uploadCreds(tempId);
+        logger.info({ sessionId }, 'session uploaded');
 
-        if (connection === "open" && !pairingDone) {
-            pairingDone = true;
-            try {
-                console.log("✅ Connected successfully, uploading creds...");
-                const sessionId = await uploadCreds(pairingId);
-                if (!sessionId) throw new Error('Failed to upload credentials');
-
-                const TERAN_BRAND = `
+        const TERAN_BRAND = `
 ╔════════════════════════════╗
 ║  ████████╗███████╗██████╗  ║
 ║  ╚══██╔══╝██╔════╝██╔══██╗ ║
@@ -130,20 +208,63 @@ Use this Session ID to deploy your bot.
 Version: 5.0.0
 `;
 
-                await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
-                await Gifted.sendMessage(Gifted.user.id, { text: TERAN_BRAND });
-
-                res.write(JSON.stringify({ sessionId, brand: TERAN_BRAND }) + "\n");
-                res.end();
-            } catch (err) {
-                console.error('❌ Error in connection update:', err);
-                res.write(JSON.stringify({ error: err.message }) + "\n");
-                res.end();
-            } finally {
-                await cleanup();
-            }
+        // send messages to the logged-in account (best-effort)
+        try {
+          await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
+          await Gifted.sendMessage(Gifted.user.id, { text: TERAN_BRAND });
+        } catch (err) {
+          logger.warn({ err }, 'failed to send messages to self (non-fatal)');
         }
-    });
+
+        sseSend(res, 'session', { sessionId, brand: TERAN_BRAND });
+        res.end();
+      } catch (err) {
+        logger.error({ err: err.response?.data || err.message }, 'uploadCreds failed');
+        sseSend(res, 'error', { message: 'upload failed', detail: err.response?.data || err.message });
+        res.end();
+      } finally {
+        // ensure close + cleanup
+        try { await Gifted.ws.close(); } catch(e) { logger.debug(e, 'ws close'); }
+        await removeFile(authDir).catch(e => logger.warn(e, 'cleanup removeFile'));
+      }
+    }
+  });
+
+  // request pairing code if not registered
+  try {
+    if (!Gifted.authState.creds.registered) {
+      await delay(1500);
+      const code = await Gifted.requestPairingCode(phone);
+      logger.info({ phone, code }, 'requestPairingCode returned');
+      // send pairing code via SSE to client
+      sseSend(res, 'code', { code });
+      // keep SSE open - watchdog will handle timeout if not connected
+    } else {
+      logger.info('Already registered on this auth state');
+      sseSend(res, 'info', { message: 'already registered' });
+      res.end();
+      clearTimeout(watchdog);
+      await Gifted.ws.close().catch(() => {});
+      await removeFile(authDir).catch(() => {});
+    }
+  } catch (err) {
+    logger.error({ err: err.response?.data || err.message }, 'Error when requesting pairing code');
+    sseSend(res, 'error', { message: 'requestPairingCode failed', detail: err.response?.data || err.message });
+    res.end();
+    clearTimeout(watchdog);
+    try { await Gifted.ws.close(); } catch(e) {}
+    await removeFile(authDir).catch(() => {});
+  }
+
+  // client disconnect handling: if client (browser) closes connection, abort pairing
+  req.on('close', async () => {
+    if (!pairingDone) {
+      logger.info('Client closed SSE connection — aborting pairing');
+      clearTimeout(watchdog);
+      try { await Gifted.ws.close(); } catch(e) {}
+      await removeFile(authDir).catch(e => logger.warn(e, 'cleanup after client close'));
+    }
+  });
 });
 
 module.exports = router;
