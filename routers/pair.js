@@ -34,7 +34,7 @@ async function uploadCreds(id) {
         const credsData = JSON.parse(fs.readFileSync(authPath, 'utf8'));
         const credsId = teranId();
 
-        const response = await axios.post(
+        await axios.post(
             `${SESSIONS_API_URL}/api/uploadCreds.php`,
             { credsId, credsData },
             {
@@ -44,6 +44,7 @@ async function uploadCreds(id) {
                 },
             }
         );
+
         return credsId;
     } catch (error) {
         console.error('Error uploading credentials:', error.response?.data || error.message);
@@ -69,7 +70,7 @@ router.get('/', async (req, res) => {
 
             const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-            let Teran = TERAN_XMD({
+            let Gifted = TERAN_XMD({
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -79,10 +80,10 @@ router.get('/', async (req, res) => {
                 browser: Browsers.macOS("Safari")
             });
 
-            if (!Teran.authState.creds.registered) {
+            if (!Gifted.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
-                const code = await Teran.requestPairingCode(num);
+                const code = await Gifted.requestPairingCode(num);
                 console.log(`Your Code: ${code}`);
 
                 if (!res.headersSent) {
@@ -90,25 +91,25 @@ router.get('/', async (req, res) => {
                 }
             }
 
-            Teran.ev.on('creds.update', saveCreds);
+            Gifted.ev.on('creds.update', saveCreds);
 
-            Teran.ev.on("connection.update", async (s) => {
-                const { connection, lastDisconnect } = s;
+            Gifted.ev.on("connection.update", async (s) => {
+                const { connection } = s;
 
-               if (connection === "open") {
-    await delay(5000);
+                if (connection === "open") {
+                    await delay(5000);
 
-    try {
-        const sessionId = await uploadCreds(id);
-        if (!sessionId) {
-            throw new Error('Failed to upload credentials');
-        }
+                    try {
+                        const sessionId = await uploadCreds(id);
+                        if (!sessionId) {
+                            throw new Error('Failed to upload credentials');
+                        }
 
-        // Send the Session ID as the first message
-        const session = await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
+                        // Send the Session ID as the first message
+                        const session = await Gifted.sendMessage(Gifted.user.id, { text: sessionId });
 
-        // Your custom TERAN-XMD branding message
-        const TERAN_BRAND = `
+                        // TERAN-XMD branding message
+                        const TERAN_BRAND = `
 ╔════════════════════════════╗
 ║  ████████╗███████╗██████╗  ║
 ║  ╚══██╔══╝██╔════╝██╔══██╗ ║
@@ -127,13 +128,33 @@ Make sure to validate it first using your validator tool.
 Version: 5.0.0
 `;
 
-        await Gifted.sendMessage(Gifted.user.id, { text: TERAN_BRAND }, { quoted: session });
+                        await Gifted.sendMessage(Gifted.user.id, { text: TERAN_BRAND }, { quoted: session });
 
-    } catch (err) {
-        console.error('Error in connection update:', err);
-    } finally {
-        await delay(100);
-        await Gifted.ws.close();
-        removeFile(authDir).catch(err => console.error('Error removing temp files:', err));
+                    } catch (err) {
+                        console.error('Error in connection update:', err);
+                    } finally {
+                        await delay(100);
+                        await Gifted.ws.close();
+                        removeFile(authDir).catch(err => console.error('Error removing temp files:', err));
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error("Fatal error:", error);
+            try {
+                await removeFile(authDir);
+            } catch (finalCleanupError) {
+                console.error('Final cleanup failed:', finalCleanupError);
+            }
+
+            if (!res.headersSent) {
+                res.status(500).send("Service unavailable");
+            }
+        }
     }
-}
+
+    await TERAN_PAIR_CODE();
+});
+
+module.exports = router;
