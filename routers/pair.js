@@ -1,15 +1,10 @@
-const { giftedId: teranId, removeFile } = require('../lib');
+const { teranId, removeFile } = require('../lib'); // fixed import
 const express = require('express');
-const fs = require('fs');
+const fs = require('fs').promises;
+const path = require('path');
 const axios = require('axios');
 require('dotenv').config();
-const path = require('path');
-let router = express.Router();
 const pino = require("pino");
-
-const SESSIONS_API_URL = process.env.SESSIONS_API_URL;
-const SESSIONS_API_KEY = process.env.SESSIONS_API_KEY;
-
 const {
     default: TERAN_XMD,
     useMultiFileAuthState,
@@ -18,16 +13,21 @@ const {
     Browsers
 } = require("@whiskeysockets/baileys");
 
+const router = express.Router();
+const { SESSIONS_API_URL, SESSIONS_API_KEY } = process.env;
+
 async function uploadCreds(id) {
     try {
         const authPath = path.join(__dirname, 'temp', id, 'creds.json');
 
-        if (!fs.existsSync(authPath)) {
-            console.error('❌ Creds file not found at:', authPath);
+        try {
+            await fs.access(authPath);
+        } catch {
+            console.error('❌ Creds file not found:', authPath);
             return null;
         }
 
-        const credsData = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+        const credsData = JSON.parse(await fs.readFile(authPath, 'utf8'));
         const credsId = teranId();
 
         await axios.post(
@@ -38,6 +38,7 @@ async function uploadCreds(id) {
                     'x-api-key': SESSIONS_API_KEY,
                     'Content-Type': 'application/json',
                 },
+                timeout: 10000
             }
         );
 
@@ -49,18 +50,15 @@ async function uploadCreds(id) {
 }
 
 router.get('/', async (req, res) => {
-    const id = teranId();
-    let num = req.query.number;
+    const pairingId = teranId();
+    const phoneNumber = req.query.number;
 
-    if (!num) {
-        return res.status(400).send({ error: "Phone number is required" });
+    if (!phoneNumber) {
+        return res.status(400).json({ error: "Phone number is required" });
     }
 
-    const authDir = path.join(__dirname, 'temp', id);
-
-    if (!fs.existsSync(authDir)) {
-        fs.mkdirSync(authDir, { recursive: true });
-    }
+    const authDir = path.join(__dirname, 'temp', pairingId);
+    await fs.mkdir(authDir, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -78,38 +76,39 @@ router.get('/', async (req, res) => {
 
     if (!Gifted.authState.creds.registered) {
         await delay(1500);
-        num = num.replace(/[^0-9]/g, '');
-        const code = await Gifted.requestPairingCode(num);
-        console.log(`📲 Pairing Code for ${num}: ${code}`);
+        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        const code = await Gifted.requestPairingCode(cleanNumber);
+        console.log(`📲 Pairing Code for ${cleanNumber}: ${code}`);
 
-        // Send code to HTTP client
         res.write(JSON.stringify({ code }) + "\n");
-        res.flush?.(); // Keep connection open
+        res.flush?.();
     }
 
     Gifted.ev.on('creds.update', saveCreds);
 
-    Gifted.ev.on("connection.update", async (s) => {
-        console.log("🔄 Connection Update:", s);
+    const cleanup = async () => {
+        await delay(100);
+        await Gifted.ws.close().catch(() => {});
+        await removeFile(authDir);
+    };
 
-        const { connection, lastDisconnect } = s;
+    Gifted.ev.on("connection.update", async (update) => {
+        console.log("🔄 Connection Update:", update);
+        const { connection, lastDisconnect } = update;
 
-        if (connection === "close") {
+        if (connection === "close" && !pairingDone) {
+            pairingDone = true;
             const reason = lastDisconnect?.error?.output?.statusCode;
-            console.error("❌ Connection closed. Reason:", reason);
-            if (!pairingDone) {
-                pairingDone = true;
-                res.write(JSON.stringify({ error: "Connection closed", reason }) + "\n");
-                res.end();
-            }
+            res.write(JSON.stringify({ error: "Connection closed", reason }) + "\n");
+            res.end();
+            await cleanup();
         }
 
         if (connection === "open" && !pairingDone) {
             pairingDone = true;
-            console.log("✅ Connected successfully, uploading creds...");
-
             try {
-                const sessionId = await uploadCreds(id);
+                console.log("✅ Connected successfully, uploading creds...");
+                const sessionId = await uploadCreds(pairingId);
                 if (!sessionId) throw new Error('Failed to upload credentials');
 
                 const TERAN_BRAND = `
@@ -141,9 +140,7 @@ Version: 5.0.0
                 res.write(JSON.stringify({ error: err.message }) + "\n");
                 res.end();
             } finally {
-                await delay(100);
-                await Gifted.ws.close();
-                removeFile(authDir).catch(err => console.error('❌ Error removing temp files:', err));
+                await cleanup();
             }
         }
     });
